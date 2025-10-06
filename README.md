@@ -357,7 +357,7 @@ $$
 
 Where:
 - $T_k(x)$ = Chebyshev polynomial of order $k$
-- $\tilde{\lambda}_j = 2(\lambda_j - \lambda_{\min}) / (\lambda_{\max} - \lambda_{\min}) - 1$ (normalized to $[-1, 1]$)
+- `\tilde{\lambda}_j = 2(\lambda_j - \lambda_{\min}) / (\lambda_{\max} - \lambda_{\min}) - 1` (normalized to $[-1, 1]$)
 - $\boldsymbol{\theta} = (\theta_0, \ldots, \theta_K)$ = spectral coefficients to be learned
 
 The spatial prior becomes:
@@ -377,8 +377,8 @@ q(\boldsymbol{\beta}, \boldsymbol{\theta}, \tau^2, \sigma^2) = q(\boldsymbol{\be
 $$
 
 With:
-- $q(\boldsymbol{\beta}) = N(\boldsymbol{\mu}_\beta, \text{diag}(\boldsymbol{\sigma}_\beta^2))$
-- $q(\boldsymbol{\theta}) = N(\boldsymbol{\mu}_\theta, \text{diag}(\boldsymbol{\sigma}_\theta^2))$
+- `q(\boldsymbol{\beta}) = N(\boldsymbol{\mu}_\beta, \text{diag}(\boldsymbol{\sigma}_\beta^2))`
+- `q(\boldsymbol{\theta}) = N(\boldsymbol{\mu}_\theta, \text{diag}(\boldsymbol{\sigma}_\theta^2))`
 - $q(\tau^2) = \text{InverseGamma}(a_\tau^q, b_\tau^q)$
 - $q(\sigma^2) = \text{InverseGamma}(a_\sigma^q, b_\sigma^q)$
 
