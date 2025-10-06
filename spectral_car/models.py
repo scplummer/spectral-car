@@ -14,24 +14,7 @@ class SpectralCARBase(nn.Module):
     """
     Base class for spectral CAR models.
     
-    This abstract base class provides common functionality for spectral CAR models
-    including eigendecomposition storage, Chebyshev polynomial computation, and
-    spectral density evaluation.
-    
-    Args:
-        n_obs: Number of spatial observations
-        n_features: Number of fixed effect covariates
-        eigenvalues: Eigenvalues of graph Laplacian (n_obs,)
-        eigenvectors: Eigenvectors of graph Laplacian (n_obs, n_obs)
-        poly_order: Order of Chebyshev polynomial for spectral filter
-        prior_beta_mean: Prior mean for fixed effects (default: zeros)
-        prior_beta_std: Prior std for fixed effects (default: 10.0)
-        prior_theta_mean: Prior mean for spectral coefficients (default: zeros)
-        prior_theta_std: Prior std for spectral coefficients (default: 1.0)
-        prior_tau_a: Prior shape for tau^2 (spatial variance)
-        prior_tau_b: Prior rate for tau^2
-        prior_sigma_a: Prior shape for sigma^2 (observation noise)
-        prior_sigma_b: Prior rate for sigma^2
+    Supports both Chebyshev polynomial and parametric spectral densities.
     """
     
     def __init__(
@@ -41,6 +24,7 @@ class SpectralCARBase(nn.Module):
         eigenvalues: torch.Tensor,
         eigenvectors: torch.Tensor,
         poly_order: int = 5,
+        spectral_form: str = 'rational',  # NEW: 'chebyshev', 'rational', 'exponential', 'power_law'
         prior_beta_mean: Optional[torch.Tensor] = None,
         prior_beta_std: float = 5.0,
         prior_theta_mean: Optional[torch.Tensor] = None,
@@ -54,14 +38,25 @@ class SpectralCARBase(nn.Module):
         
         self.n_obs = n_obs
         self.n_features = n_features
-        self.poly_order = poly_order
+        self.poly_order = poly_order  # Only used for Chebyshev
+        self.spectral_form = spectral_form
         
-        # Store eigendecomposition as buffers (not parameters)
+        # Store eigendecomposition as buffers
         self.register_buffer('eigenvalues', eigenvalues)
         self.register_buffer('eigenvectors', eigenvectors)
         
-        # Normalize eigenvalues to [-1, 1] for Chebyshev stability
+        # Normalize eigenvalues based on spectral form
         self._normalize_eigenvalues()
+        
+        # Determine theta dimension based on spectral form
+        if spectral_form == 'chebyshev':
+            theta_dim = poly_order + 1
+        elif spectral_form in ['rational', 'exponential']:
+            theta_dim = 2
+        elif spectral_form == 'power_law':
+            theta_dim = 3
+        else:
+            raise ValueError(f"Unknown spectral_form: {spectral_form}")
         
         # Store priors as buffers
         self.register_buffer('prior_beta_mean', 
@@ -72,9 +67,9 @@ class SpectralCARBase(nn.Module):
         
         self.register_buffer('prior_theta_mean',
                            prior_theta_mean if prior_theta_mean is not None
-                           else torch.zeros(poly_order + 1))
+                           else torch.zeros(theta_dim))
         self.register_buffer('prior_theta_cov',
-                           torch.eye(poly_order + 1) * prior_theta_std**2)
+                           torch.eye(theta_dim) * prior_theta_std**2)
         
         self.prior_tau_a = prior_tau_a
         self.prior_tau_b = prior_tau_b
@@ -82,92 +77,92 @@ class SpectralCARBase(nn.Module):
         self.prior_sigma_b = prior_sigma_b
         
     def _normalize_eigenvalues(self):
-        """Normalize eigenvalues to [-1, 1] for Chebyshev polynomial stability."""
+        """Normalize eigenvalues based on spectral form."""
         lambda_min = self.eigenvalues.min()
         lambda_max = self.eigenvalues.max()
         self.register_buffer('lambda_min', lambda_min)
         self.register_buffer('lambda_max', lambda_max)
-        self.register_buffer(
-            'eigenvalues_normalized',
-            2 * (self.eigenvalues - lambda_min) / (lambda_max - lambda_min + 1e-8) - 1
-        )
-    
-    def chebyshev_polynomials(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Compute Chebyshev polynomials T_0(x), ..., T_K(x).
         
-        Uses the recurrence relation: T_{k+1}(x) = 2x*T_k(x) - T_{k-1}(x)
-        
-        Args:
-            x: Input values, shape (n,)
-            
-        Returns:
-            Tensor of shape (n, K+1) where [:, k] contains T_k(x)
-        """
-        n = x.shape[0]
-        T = torch.zeros(n, self.poly_order + 1, device=x.device)
-        T[:, 0] = 1.0
-        if self.poly_order >= 1:
-            T[:, 1] = x
-        for k in range(2, self.poly_order + 1):
-            T[:, k] = 2 * x * T[:, k-1] - T[:, k-2]
-        return T
+        if self.spectral_form == 'chebyshev':
+            # Normalize to [-1, 1] for Chebyshev
+            self.register_buffer(
+                'eigenvalues_normalized',
+                2 * (self.eigenvalues - lambda_min) / (lambda_max - lambda_min + 1e-8) - 1
+            )
+        else:
+            # Normalize to [0, 1] for parametric forms
+            self.register_buffer(
+                'eigenvalues_normalized',
+                (self.eigenvalues - lambda_min) / (lambda_max - lambda_min + 1e-8)
+            )
     
     def spectral_density(self, theta: torch.Tensor) -> torch.Tensor:
         """
-        Compute spectral density p(lambda_j; theta) = exp(sum_k theta_k * T_k(lambda_j)).
-        
-        This defines the precision at each spatial frequency (eigenvalue).
+        Compute spectral density p(lambda_j; theta).
         
         Args:
-            theta: Polynomial coefficients, shape (K+1,) or (batch, K+1)
+            theta: Spectral parameters, shape (theta_dim,) or (batch, theta_dim)
             
         Returns:
             Spectral density values, shape (n_obs,) or (batch, n_obs)
         """
-        T = self.chebyshev_polynomials(self.eigenvalues_normalized)  # (n_obs, K+1)
+        if self.spectral_form == 'chebyshev':
+            # Original Chebyshev polynomial approach
+            T = self.chebyshev_polynomials(self.eigenvalues_normalized)
+            
+            if theta.dim() == 1:
+                log_p = torch.matmul(T, theta)
+            else:
+                log_p = torch.matmul(T, theta.T).T
+            
+            spectral_density = torch.exp(log_p)
+            
+        elif self.spectral_form == 'rational':
+            # p(λ) = 1 / (a + b*λ)
+            a = torch.exp(theta[..., 0])
+            b = torch.exp(theta[..., 1])
+            
+            if theta.dim() == 1:
+                spectral_density = 1.0 / (a + b * self.eigenvalues_normalized + 1e-8)
+            else:
+                # Batch: (batch,) + (batch, 1) * (n_obs,) -> (batch, n_obs)
+                a = a.unsqueeze(-1)
+                b = b.unsqueeze(-1)
+                spectral_density = 1.0 / (a + b * self.eigenvalues_normalized + 1e-8)
+            
+        elif self.spectral_form == 'exponential':
+            # p(λ) = exp(-a - b*λ)
+            a = torch.exp(theta[..., 0])
+            b = torch.exp(theta[..., 1])
+            
+            if theta.dim() == 1:
+                spectral_density = torch.exp(-a - b * self.eigenvalues_normalized)
+            else:
+                a = a.unsqueeze(-1)
+                b = b.unsqueeze(-1)
+                spectral_density = torch.exp(-a - b * self.eigenvalues_normalized)
+            
+        elif self.spectral_form == 'power_law':
+            # p(λ) = 1 / (a + b*λ)^d
+            a = torch.exp(theta[..., 0])
+            b = torch.exp(theta[..., 1])
+            d = torch.exp(theta[..., 2])
+            
+            if theta.dim() == 1:
+                spectral_density = 1.0 / ((a + b * self.eigenvalues_normalized + 1e-8) ** d)
+            else:
+                a = a.unsqueeze(-1)
+                b = b.unsqueeze(-1)
+                d = d.unsqueeze(-1)
+                spectral_density = 1.0 / ((a + b * self.eigenvalues_normalized + 1e-8) ** d)
         
-        if theta.dim() == 1:
-            # Single sample: T @ theta
-            log_p = torch.matmul(T, theta)  # (n_obs,)
         else:
-            # Batch of samples: T @ theta.T -> (n_obs, batch) -> transpose to (batch, n_obs)
-            log_p = torch.matmul(T, theta.T).T  # (batch, n_obs)
+            raise ValueError(f"Unknown spectral_form: {self.spectral_form}")
         
-        spectral_density = torch.exp(log_p)
+        # Clamp for numerical stability
         spectral_density = torch.clamp(spectral_density, min=1e-6, max=1e6)
-        return spectral_density
-    
-    def get_parameter_summary(self) -> dict:
-        """
-        Get summary of estimated parameters.
-        
-        Returns:
-            Dictionary with parameter means and standard deviations
-        """
-        with torch.no_grad():
-            # Variance parameters - check if a > 2 for valid variance
-            tau2_mean = (self.b_tau / (self.a_tau - 1)).item()
-            tau2_var = self.b_tau**2 / ((self.a_tau - 1)**2 * torch.clamp(self.a_tau - 2, min=1e-6))
-            tau2_std = torch.sqrt(tau2_var).item()
-            
-            sigma2_mean = (self.b_sigma / (self.a_sigma - 1)).item()
-            sigma2_var = self.b_sigma**2 / ((self.a_sigma - 1)**2 * torch.clamp(self.a_sigma - 2, min=1e-6))
-            sigma2_std = torch.sqrt(sigma2_var).item()
-            
-            summary = {
-                'beta_mean': self.mu_beta.cpu().numpy(),
-                'beta_std': self.sigma_beta.cpu().numpy(),
-                'theta_mean': self.mu_theta.cpu().numpy(),
-                'theta_std': self.sigma_theta.cpu().numpy(),
-                'tau2_mean': tau2_mean,
-                'tau2_std': tau2_std,
-                'sigma2_mean': sigma2_mean,
-                'sigma2_std': sigma2_std,
-            }
-            
-            return summary
 
+        return spectral_density
 
 class SpectralCARMeanField(SpectralCARBase):
     """
@@ -204,24 +199,37 @@ class SpectralCARMeanField(SpectralCARBase):
         
         self._init_variational_parameters()
         
+    # For SpectralCARMeanField class:
     def _init_variational_parameters(self):
         """Initialize variational distribution parameters."""
         # q(beta) = N(mu_beta, diag(sigma_beta^2))
         self.mu_beta = nn.Parameter(torch.zeros(self.n_features))
         self.log_diag_sigma_beta = nn.Parameter(torch.zeros(self.n_features) - 0.5)
-        
+    
         # q(theta) = N(mu_theta, diag(sigma_theta^2))
-        init_theta = torch.zeros(self.poly_order + 1)
-        init_theta[0] = 0.5  # Bias towards positive spectral density
+        theta_dim = self.prior_theta_mean.shape[0]
+    
+        if self.spectral_form == 'chebyshev':
+            init_theta = torch.zeros(theta_dim)
+            init_theta[0] = 0.5  # Bias towards positive spectral density
+        elif self.spectral_form == 'rational':
+            init_theta = torch.tensor([0.0, 1.0])  # a=1, b=e
+        elif self.spectral_form == 'exponential':
+            init_theta = torch.tensor([0.0, 1.0])  # a=1, b=e
+        elif self.spectral_form == 'power_law':
+            init_theta = torch.tensor([0.0, 1.0, 0.5])  # a=1, b=e, d=sqrt(e)
+        else:
+            init_theta = torch.zeros(theta_dim)
+    
         self.mu_theta = nn.Parameter(init_theta)
-        self.log_diag_sigma_theta = nn.Parameter(torch.ones(self.poly_order + 1) * (-2))
-        
+        self.log_diag_sigma_theta = nn.Parameter(torch.ones(theta_dim) * (-2))
+    
         # q(tau^2) = InverseGamma(a_tau, b_tau)
         init_a_tau = 5.0
         init_b_tau = (init_a_tau - 1) * 0.5
         self.log_a_tau = nn.Parameter(torch.log(torch.tensor(init_a_tau)))
         self.log_b_tau = nn.Parameter(torch.log(torch.tensor(init_b_tau)))
-        
+    
         # q(sigma^2) = InverseGamma(a_sigma, b_sigma)
         init_a_sigma = 6.0
         init_b_sigma = (init_a_sigma - 1) * 0.25
@@ -276,8 +284,9 @@ class SpectralCARMeanField(SpectralCARBase):
         )
         
         # Sample theta
+        theta_dim = len(self.mu_theta)
         theta_samples = self.mu_theta + self.sigma_theta * torch.randn(
-            n_samples, self.poly_order + 1, device=device
+            n_samples, theta_dim, device=device
         )
         
         # Sample tau^2 using Inverse Gamma: sample via 1/Gamma(a, 1/b)
@@ -392,10 +401,11 @@ class SpectralCARMeanField(SpectralCARBase):
         )
         
         # KL(q(theta) || p(theta))
+        theta_dim = len(self.mu_theta)
         kl_theta = 0.5 * (
             torch.sum(self.sigma_theta**2 / torch.diag(self.prior_theta_cov))
             + torch.sum(((self.mu_theta - self.prior_theta_mean)**2) / torch.diag(self.prior_theta_cov))
-            - (self.poly_order + 1)
+            - theta_dim
             + torch.sum(torch.log(torch.diag(self.prior_theta_cov)))
             - 2 * torch.sum(self.log_diag_sigma_theta)
         )
@@ -545,6 +555,7 @@ class SpectralCARJoint(SpectralCARBase):
         
         self._init_variational_parameters()
         
+    # For SpectralCARJoint class:
     def _init_variational_parameters(self):
         """Initialize variational distribution parameters."""
         # q(beta) = N(mu_beta, diag(sigma_beta^2))
@@ -556,10 +567,22 @@ class SpectralCARJoint(SpectralCARBase):
         self.log_sigma_alpha = nn.Parameter(torch.ones(self.n_obs) * (-1.5))
         
         # q(theta) = N(mu_theta, diag(sigma_theta^2))
-        init_theta = torch.zeros(self.poly_order + 1)
-        init_theta[0] = 0.5
+        theta_dim = self.prior_theta_mean.shape[0]
+        
+        if self.spectral_form == 'chebyshev':
+            init_theta = torch.zeros(theta_dim)
+            init_theta[0] = 0.5
+        elif self.spectral_form == 'rational':
+            init_theta = torch.tensor([0.0, 1.0])
+        elif self.spectral_form == 'exponential':
+            init_theta = torch.tensor([0.0, 1.0])
+        elif self.spectral_form == 'power_law':
+            init_theta = torch.tensor([0.0, 1.0, 0.5])
+        else:
+            init_theta = torch.zeros(theta_dim)
+        
         self.mu_theta = nn.Parameter(init_theta)
-        self.log_diag_sigma_theta = nn.Parameter(torch.ones(self.poly_order + 1) * (-2))
+        self.log_diag_sigma_theta = nn.Parameter(torch.ones(theta_dim) * (-2))
         
         # q(tau^2) = InverseGamma(a_tau, b_tau)
         init_a_tau = 5.0
@@ -572,7 +595,9 @@ class SpectralCARJoint(SpectralCARBase):
         init_b_sigma = (init_a_sigma - 1) * 0.25
         self.log_a_sigma = nn.Parameter(torch.log(torch.tensor(init_a_sigma)))
         self.log_b_sigma = nn.Parameter(torch.log(torch.tensor(init_b_sigma)))
-    
+
+
+
     @property
     def sigma_beta(self) -> torch.Tensor:
         """Standard deviations for beta."""
@@ -631,8 +656,9 @@ class SpectralCARJoint(SpectralCARBase):
         phi_samples = torch.matmul(alpha_samples, self.eigenvectors.T)
         
         # Sample theta
+        theta_dim = len(self.mu_theta)
         theta_samples = self.mu_theta + self.sigma_theta * torch.randn(
-            n_samples, self.poly_order + 1, device=device
+            n_samples, theta_dim, device=device
         )
         
         # Sample tau^2
@@ -747,10 +773,11 @@ class SpectralCARJoint(SpectralCARBase):
         )
         
         # KL(q(theta) || p(theta))
+        theta_dim = len(self.mu_theta)
         kl_theta = 0.5 * (
             torch.sum(self.sigma_theta**2 / torch.diag(self.prior_theta_cov))
             + torch.sum(((self.mu_theta - self.prior_theta_mean)**2) / torch.diag(self.prior_theta_cov))
-            - (self.poly_order + 1)
+            - theta_dim
             + torch.sum(torch.log(torch.diag(self.prior_theta_cov)))
             - 2 * torch.sum(self.log_diag_sigma_theta)
         )
@@ -894,39 +921,48 @@ class SpectralCARLowRank(SpectralCARBase):
         
         self._init_variational_parameters()
         
+    # For SpectralCARLowRank class:
     def _init_variational_parameters(self):
         """Initialize variational parameters with low-rank structure."""
         # q(beta) = N(mu_beta, diag(sigma_beta^2))
         self.mu_beta = nn.Parameter(torch.zeros(self.n_features))
         self.log_diag_sigma_beta = nn.Parameter(torch.zeros(self.n_features) - 0.5)
-        
+    
         # q(alpha) = N(mu_alpha, Sigma_alpha) where Sigma_alpha = D + LL^T
-        # Mean
         self.mu_alpha = nn.Parameter(torch.zeros(self.n_obs))
-        
-        # Diagonal component
         self.log_sigma_alpha = nn.Parameter(torch.ones(self.n_obs) * (-1.5))
-        
-        # Low-rank component: L is (n_obs, rank)
         self.L_alpha = nn.Parameter(torch.randn(self.n_obs, self.low_rank) * 0.01)
-        
+    
         # q(theta) = N(mu_theta, diag(sigma_theta^2))
-        init_theta = torch.zeros(self.poly_order + 1)
-        init_theta[0] = 0.5
+        theta_dim = self.prior_theta_mean.shape[0]
+    
+        if self.spectral_form == 'chebyshev':
+            init_theta = torch.zeros(theta_dim)
+            init_theta[0] = 0.5
+        elif self.spectral_form == 'rational':
+            init_theta = torch.tensor([0.0, 1.0])
+        elif self.spectral_form == 'exponential':
+            init_theta = torch.tensor([0.0, 1.0])
+        elif self.spectral_form == 'power_law':
+            init_theta = torch.tensor([0.0, 1.0, 0.5])
+        else:
+            init_theta = torch.zeros(theta_dim)
+    
         self.mu_theta = nn.Parameter(init_theta)
-        self.log_diag_sigma_theta = nn.Parameter(torch.ones(self.poly_order + 1) * (-2))
-        
+        self.log_diag_sigma_theta = nn.Parameter(torch.ones(theta_dim) * (-2))
+    
         # q(tau^2) = InverseGamma(a_tau, b_tau)
         init_a_tau = 5.0
         init_b_tau = (init_a_tau - 1) * 0.5
         self.log_a_tau = nn.Parameter(torch.log(torch.tensor(init_a_tau)))
         self.log_b_tau = nn.Parameter(torch.log(torch.tensor(init_b_tau)))
-        
+    
         # q(sigma^2) = InverseGamma(a_sigma, b_sigma)
         init_a_sigma = 6.0
         init_b_sigma = (init_a_sigma - 1) * 0.25
         self.log_a_sigma = nn.Parameter(torch.log(torch.tensor(init_a_sigma)))
         self.log_b_sigma = nn.Parameter(torch.log(torch.tensor(init_b_sigma)))
+    
     
     @property
     def sigma_beta(self) -> torch.Tensor:
@@ -1001,8 +1037,9 @@ class SpectralCARLowRank(SpectralCARBase):
         phi_samples = torch.matmul(alpha_samples, self.eigenvectors.T)
         
         # Sample theta
+        theta_dim = len(self.mu_theta)
         theta_samples = self.mu_theta + self.sigma_theta * torch.randn(
-            n_samples, self.poly_order + 1, device=device
+            n_samples, theta_dim, device=device
         )
         
         # Sample tau^2
@@ -1135,10 +1172,11 @@ class SpectralCARLowRank(SpectralCARBase):
         )
         
         # KL(q(theta) || p(theta))
+        theta_dim = len(self.mu_theta)
         kl_theta = 0.5 * (
             torch.sum(self.sigma_theta**2 / torch.diag(self.prior_theta_cov))
             + torch.sum(((self.mu_theta - self.prior_theta_mean)**2) / torch.diag(self.prior_theta_cov))
-            - (self.poly_order + 1)
+            - theta_dim
             + torch.sum(torch.log(torch.diag(self.prior_theta_cov)))
             - 2 * torch.sum(self.log_diag_sigma_theta)
         )

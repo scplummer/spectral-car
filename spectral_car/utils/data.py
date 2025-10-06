@@ -20,7 +20,8 @@ def generate_synthetic_spatial_data(
     theta: Optional[torch.Tensor] = None,
     tau2: float = 0.5,
     sigma2: float = 0.25,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
+    spectral_form: str = 'rational'
 ) -> dict:
     """
     Generate synthetic spatial data with CAR structure.
@@ -36,10 +37,14 @@ def generate_synthetic_spatial_data(
         eigenvalues: Graph Laplacian eigenvalues
         eigenvectors: Graph Laplacian eigenvectors
         beta: Fixed effects (if None, randomly generated)
-        theta: Spectral polynomial coefficients (if None, randomly generated)
+        theta: Spectral parameters (if None, randomly generated)
+               For 'rational': [log(a), log(b)] where p(λ) = 1/(a + b*λ)
+               For 'exponential': [log(a), log(b)] where p(λ) = exp(-a - b*λ)
+               For 'power_law': [log(a), log(b), log(d)] where p(λ) = 1/(a + b*λ)^d
         tau2: Spatial variance
         sigma2: Observation noise variance
         seed: Random seed for reproducibility
+        spectral_form: Type of spectral density ('rational', 'exponential', 'power_law')
         
     Returns:
         Dictionary containing:
@@ -50,12 +55,14 @@ def generate_synthetic_spatial_data(
             - theta: True spectral coefficients
             - tau2: Spatial variance
             - sigma2: Observation noise variance
+            - spectral_form: Type of spectral density used
             
     Example:
         >>> eigenvalues, eigenvectors = create_grid_graph_laplacian(64, 8)
         >>> data = generate_synthetic_spatial_data(
         ...     n_obs=64, n_features=3, 
-        ...     eigenvalues=eigenvalues, eigenvectors=eigenvectors
+        ...     eigenvalues=eigenvalues, eigenvectors=eigenvectors,
+        ...     spectral_form='rational'
         ... )
         >>> print(data['y'].shape)  # torch.Size([64])
     """
@@ -70,29 +77,47 @@ def generate_synthetic_spatial_data(
     if beta is None:
         beta = torch.randn(n_features)
     
-    # Generate or use provided theta
+    # Generate or use provided theta based on spectral form
     if theta is None:
-        poly_order = 5
-        theta = torch.randn(poly_order + 1) * 0.5
-        theta[0] = 0.5  # Ensure positive spectral density
+        if spectral_form == 'rational':
+            # Default: 1/(a + b*lambda) with moderate decay
+            theta = torch.tensor([0.0, 1.0])  # a=1, b=e
+        elif spectral_form == 'exponential':
+            # Default: exp(-a - b*lambda)
+            theta = torch.tensor([0.0, 1.0])
+        elif spectral_form == 'power_law':
+            # Default: 1/(a + b*lambda)^d
+            theta = torch.tensor([0.0, 1.0, 0.5])  # d = sqrt(e) ≈ 1.65
+        else:
+            raise ValueError(f"Unknown spectral_form: {spectral_form}")
     
-    
-    # Need to normalize eigenvalues
+    # Normalize eigenvalues to [0, 1]
     lambda_min = eigenvalues.min()
     lambda_max = eigenvalues.max()
-    eigenvalues_norm = 2 * (eigenvalues - lambda_min) / (lambda_max - lambda_min + 1e-8) - 1
+    eigenvalues_norm = (eigenvalues - lambda_min) / (lambda_max - lambda_min + 1e-8)
     
-    # Chebyshev polynomials
-    poly_order = len(theta) - 1
-    T = torch.zeros(n_obs, poly_order + 1)
-    T[:, 0] = 1.0
-    if poly_order >= 1:
-        T[:, 1] = eigenvalues_norm
-    for k in range(2, poly_order + 1):
-        T[:, k] = 2 * eigenvalues_norm * T[:, k-1] - T[:, k-2]
-    
-    log_p = torch.matmul(T, theta)
-    p_lambda = torch.exp(log_p)
+    # Compute spectral density based on chosen form
+    if spectral_form == 'rational':
+        # p(λ) = 1 / (a + b*λ)
+        a = torch.exp(theta[0])
+        b = torch.exp(theta[1])
+        p_lambda = 1.0 / (a + b * eigenvalues_norm + 1e-8)
+        
+    elif spectral_form == 'exponential':
+        # p(λ) = exp(-a - b*λ)
+        a = torch.exp(theta[0])
+        b = torch.exp(theta[1])
+        p_lambda = torch.exp(-a - b * eigenvalues_norm)
+        
+    elif spectral_form == 'power_law':
+        # p(λ) = 1 / (a + b*λ)^d
+        a = torch.exp(theta[0])
+        b = torch.exp(theta[1])
+        d = torch.exp(theta[2])
+        p_lambda = 1.0 / ((a + b * eigenvalues_norm + 1e-8) ** d)
+        
+    else:
+        raise ValueError(f"Unknown spectral_form: {spectral_form}")
     
     # Generate spatial effect from CAR prior
     # Q^{-1} = U @ diag(1 / (tau^2 * p_lambda)) @ U^T
@@ -116,8 +141,12 @@ def generate_synthetic_spatial_data(
         'sigma2': sigma2,
         'eigenvalues': eigenvalues,
         'eigenvectors': eigenvectors,
+        'spectral_form': spectral_form,
     }
 
+#===========================================
+# Non - CAR Examples
+#===========================================
 
 def generate_smooth_spatial_field(
     grid_size: int,
@@ -126,7 +155,7 @@ def generate_smooth_spatial_field(
     seed: Optional[int] = None
 ) -> torch.Tensor:
     """
-    Generate smooth spatial field using Gaussian process.
+    Generate smooth spatial field using Gaussian process. 
     
     Creates a smooth random field on a 2D grid using a Matérn covariance.
     Useful for generating realistic spatial patterns.
@@ -394,90 +423,11 @@ def generate_train_test_split(
     
     return train_indices, test_indices
 
+#====================================
+# Generate Benchmark Datasets
+#====================================
 
-def generate_benchmark_dataset(
-    name: str,
-    grid_size: int = 8,
-    seed: Optional[int] = None
-) -> dict:
-    """
-    Generate standard benchmark datasets for testing.
-    
-    Args:
-        name: Dataset name ('smooth', 'rough', 'multi_scale', 'anisotropic')
-        grid_size: Size of square grid
-        seed: Random seed
-        
-    Returns:
-        Dataset dictionary (same format as generate_synthetic_spatial_data)
-        
-    Example:
-        >>> data = generate_benchmark_dataset('smooth', grid_size=8)
-        >>> data = generate_benchmark_dataset('multi_scale', grid_size=16)
-    """
-    if seed is not None:
-        torch.manual_seed(seed)
-    
-    n_obs = grid_size ** 2
-    eigenvalues, eigenvectors = create_grid_graph_laplacian(n_obs, grid_size)
-    
-    if name == 'smooth':
-        # Very smooth spatial field
-        theta = torch.tensor([1.0, -1.5, 0.5, 0.0, 0.0, 0.0])
-        tau2, sigma2 = 1.0, 0.1
-        
-    elif name == 'rough':
-        # Rough spatial field (less smoothing)
-        theta = torch.tensor([0.2, -0.3, 0.1, 0.0, 0.0, 0.0])
-        tau2, sigma2 = 0.3, 0.5
-        
-    elif name == 'multi_scale':
-        # Multiple spatial scales
-        theta = torch.tensor([0.5, -0.8, 0.6, -0.3, 0.1, 0.0])
-        tau2, sigma2 = 0.5, 0.25
-        
-    elif name == 'anisotropic':
-        # Generate anisotropic field directly
-        phi = generate_anisotropic_field(grid_size, angle=np.pi/4, aspect_ratio=3.0)
-        
-        # Generate other components
-        X = torch.randn(n_obs, 3)
-        X[:, 0] = 1.0
-        beta = torch.tensor([2.0, -1.0, 0.5])
-        sigma2 = 0.25
-        y = X @ beta + phi + torch.randn(n_obs) * np.sqrt(sigma2)
-        
-        return {
-            'y': y,
-            'X': X,
-            'phi': phi,
-            'beta': beta,
-            'theta': None,  # Not applicable
-            'tau2': None,
-            'sigma2': sigma2,
-            'eigenvalues': eigenvalues,
-            'eigenvectors': eigenvectors,
-            'name': name
-        }
-        
-    else:
-        raise ValueError(f"Unknown benchmark dataset: {name}")
-    
-    # Generate data using specified parameters
-    data = generate_synthetic_spatial_data(
-        n_obs=n_obs,
-        n_features=3,
-        eigenvalues=eigenvalues,
-        eigenvectors=eigenvectors,
-        beta=torch.tensor([2.0, -1.0, 0.5]),
-        theta=theta,
-        tau2=tau2,
-        sigma2=sigma2,
-        seed=seed
-    )
-    data['name'] = name
-    
-    return data
+
 
 def generate_benchmark_dataset(
     name: str,
@@ -536,42 +486,36 @@ def generate_benchmark_dataset(
     """
     if seed is not None:
         torch.manual_seed(seed)
-        np.random.seed(seed)
     
-    # Define polynomial order for spectral representation
-    poly_order = 6
+    n_obs = grid_size ** 2
+    eigenvalues, eigenvectors = create_grid_graph_laplacian(n_obs, grid_size)
     
     if name == 'smooth':
-        # Smooth spatial field (strong spatial correlation)
-        theta = torch.tensor([1.0, -0.5, 0.2, -0.05, 0.01, 0.0])
-        tau2, sigma2 = 1.0, 0.25
+        # Strong spatial correlation (slow decay)
+        theta = torch.tensor([0.0, 0.5])  # a=1, b=1.65
+        spectral_form = 'rational'
+        tau2, sigma2 = 1.0, 0.1
         
     elif name == 'rough':
-        # Rough spatial field (weak spatial correlation)
-        theta = torch.tensor([0.2, -0.1, 0.05, 0.0, 0.0, 0.0])
+        # Weak spatial correlation (fast decay)
+        theta = torch.tensor([0.0, 2.0])  # a=1, b=7.4
+        spectral_form = 'rational'
         tau2, sigma2 = 0.3, 0.5
         
     elif name == 'multi_scale':
-        # Multiple spatial scales
-        theta = torch.tensor([0.5, -0.8, 0.6, -0.3, 0.1, 0.0])
+        # Could use power_law for more flexibility
+        theta = torch.tensor([0.0, 1.0, 0.7])  # a=1, b=2.7, d=2.0
+        spectral_form = 'power_law'
         tau2, sigma2 = 0.5, 0.25
         
     elif name == 'anisotropic':
-        # For anisotropic, we'll use generate_anisotropic_field
-        # and construct the data manually
-        phi = generate_anisotropic_field(
-            grid_size, 
-            angle=np.pi/4, 
-            aspect_ratio=3.0
-        )
+        # Generate anisotropic field directly
+        phi = generate_anisotropic_field(grid_size, angle=np.pi/4, aspect_ratio=3.0)
         
-        # Generate covariates and coefficients
-        X = torch.randn(n_obs, n_features)
-        X[:, 0] = 1.0  # Intercept
-        beta = torch.tensor([2.0] + [-1.0, 0.5][:n_features-1])
-        if len(beta) < n_features:
-            beta = torch.cat([beta, torch.randn(n_features - len(beta))])
-        
+        # Generate other components
+        X = torch.randn(n_obs, 3)
+        X[:, 0] = 1.0
+        beta = torch.tensor([2.0, -1.0, 0.5])
         sigma2 = 0.25
         y = X @ beta + phi + torch.randn(n_obs) * np.sqrt(sigma2)
         
@@ -580,8 +524,8 @@ def generate_benchmark_dataset(
             'X': X,
             'phi': phi,
             'beta': beta,
-            'theta': None,  # Not applicable for anisotropic
-            'tau2': None,   # Not applicable
+            'theta': None,  # Not applicable
+            'tau2': None,
             'sigma2': sigma2,
             'eigenvalues': eigenvalues,
             'eigenvectors': eigenvectors,
@@ -589,31 +533,22 @@ def generate_benchmark_dataset(
         }
         
     else:
-        raise ValueError(
-            f"Unknown benchmark dataset: {name}. "
-            f"Choose from: 'smooth', 'rough', 'multi_scale', 'anisotropic'"
-        )
+        raise ValueError(f"Unknown benchmark dataset: {name}")
     
-    # Generate standard coefficients for covariates
-    beta = torch.tensor([2.0] + [-1.0, 0.5][:n_features-1])
-    if len(beta) < n_features:
-        # If more features requested, add random coefficients
-        beta = torch.cat([beta, torch.randn(n_features - len(beta))])
-    
-    # Generate data using the spectral representation
+    # Generate data using specified parameters
     data = generate_synthetic_spatial_data(
         n_obs=n_obs,
-        n_features=n_features,
+        n_features=3,
         eigenvalues=eigenvalues,
         eigenvectors=eigenvectors,
-        beta=beta,
+        beta=torch.tensor([2.0, -1.0, 0.5]),
         theta=theta,
         tau2=tau2,
         sigma2=sigma2,
+        spectral_form=spectral_form,
         seed=seed
     )
-    
-    # Add metadata
     data['name'] = name
-    
+    data['spectral_form'] = spectral_form
+
     return data

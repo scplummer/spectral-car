@@ -94,52 +94,88 @@ def normalize_eigenvalues(
     return eigenvalues_normalized, params
 
 
-def spectral_density_from_polynomial(
+def spectral_density(
     eigenvalues: torch.Tensor,
     theta: torch.Tensor,
-    poly_type: str = 'chebyshev'
+    spectral_form: str = 'rational'
 ) -> torch.Tensor:
     """
-    Evaluate spectral density p(lambda; theta) from polynomial coefficients.
-    
-    Computes: p(lambda) = exp(sum_k theta_k * P_k(lambda))
-    where P_k are polynomial basis functions.
+    Evaluate spectral density p(lambda; theta) using specified functional form.
     
     Args:
-        eigenvalues: Eigenvalues to evaluate at (n,)
-        theta: Polynomial coefficients (K+1,) or (batch, K+1)
-        poly_type: Polynomial basis ('chebyshev', 'monomial', 'legendre')
+        eigenvalues: Eigenvalues to evaluate at (n,). Should be normalized to 
+                    [0,1] for parametric forms or [-1,1] for Chebyshev.
+        theta: Spectral parameters
+               - 'chebyshev': (K+1,) polynomial coefficients
+               - 'rational': (2,) = [log(a), log(b)] for p = 1/(a + b*λ)
+               - 'exponential': (2,) = [log(a), log(b)] for p = exp(-a - b*λ)
+               - 'power_law': (3,) = [log(a), log(b), log(d)] for p = 1/(a + b*λ)^d
+        spectral_form: Type of spectral density function
         
     Returns:
-        Spectral density values (n,) or (batch, n)
+        Spectral density values (n,) or (batch, n) if theta is batched
         
     Example:
-        >>> eigenvalues = torch.linspace(-1, 1, 100)
-        >>> theta = torch.tensor([1.0, -0.5, 0.2])
-        >>> p_lambda = spectral_density_from_polynomial(eigenvalues, theta)
+        >>> eigenvalues = torch.linspace(0, 1, 100)
+        >>> theta = torch.tensor([0.0, 1.0])  # a=1, b=e
+        >>> p_lambda = spectral_density(eigenvalues, theta, 'rational')
     """
-    order = theta.shape[-1] - 1
+    if spectral_form == 'chebyshev':
+        # Use polynomial approach
+        order = theta.shape[-1] - 1
+        T = chebyshev_polynomials(eigenvalues, order)
+        
+        if theta.dim() == 1:
+            log_p = torch.matmul(T, theta)
+        else:
+            log_p = torch.matmul(T, theta.T).T
+        
+        spectral_density = torch.exp(log_p)
+        
+    elif spectral_form == 'rational':
+        # p(λ) = 1 / (a + b*λ)
+        a = torch.exp(theta[..., 0])
+        b = torch.exp(theta[..., 1])
+        
+        if theta.dim() == 1:
+            spectral_density = 1.0 / (a + b * eigenvalues + 1e-8)
+        else:
+            a = a.unsqueeze(-1)
+            b = b.unsqueeze(-1)
+            spectral_density = 1.0 / (a + b * eigenvalues + 1e-8)
+        
+    elif spectral_form == 'exponential':
+        # p(λ) = exp(-a - b*λ)
+        a = torch.exp(theta[..., 0])
+        b = torch.exp(theta[..., 1])
+        
+        if theta.dim() == 1:
+            spectral_density = torch.exp(-a - b * eigenvalues)
+        else:
+            a = a.unsqueeze(-1)
+            b = b.unsqueeze(-1)
+            spectral_density = torch.exp(-a - b * eigenvalues)
+        
+    elif spectral_form == 'power_law':
+        # p(λ) = 1 / (a + b*λ)^d
+        a = torch.exp(theta[..., 0])
+        b = torch.exp(theta[..., 1])
+        d = torch.exp(theta[..., 2])
+        
+        if theta.dim() == 1:
+            spectral_density = 1.0 / ((a + b * eigenvalues + 1e-8) ** d)
+        else:
+            a = a.unsqueeze(-1)
+            b = b.unsqueeze(-1)
+            d = d.unsqueeze(-1)
+            spectral_density = 1.0 / ((a + b * eigenvalues + 1e-8) ** d)
     
-    if poly_type == 'chebyshev':
-        P = chebyshev_polynomials(eigenvalues, order)
-    elif poly_type == 'monomial':
-        # Standard polynomial basis: 1, x, x^2, ...
-        n = eigenvalues.shape[0]
-        P = torch.zeros(n, order + 1, device=eigenvalues.device)
-        for k in range(order + 1):
-            P[:, k] = eigenvalues ** k
-    elif poly_type == 'legendre':
-        P = legendre_polynomials(eigenvalues, order)
     else:
-        raise ValueError(f"Unknown polynomial type: {poly_type}")
+        raise ValueError(f"Unknown spectral_form: {spectral_form}")
     
-    # Compute log(p(lambda)) = sum_k theta_k * P_k(lambda)
-    if theta.dim() == 1:
-        log_p = torch.matmul(P, theta)  # (n,)
-    else:
-        log_p = torch.matmul(P, theta.T).T  # (batch, n)
-    
-    return torch.exp(log_p)
+    # Clamp for numerical stability
+    spectral_density = torch.clamp(spectral_density, min=1e-6, max=1e6)
+    return spectral_density
 
 
 def legendre_polynomials(
@@ -334,6 +370,7 @@ def spectral_smoothness(
 def estimate_spatial_range(
     eigenvalues: torch.Tensor,
     theta: torch.Tensor,
+    spectral_form: str = 'rational',
     grid_spacing: float = 1.0
 ) -> float:
     """
@@ -343,19 +380,21 @@ def estimate_spatial_range(
     Useful for interpreting learned spectral filters.
     
     Args:
-        eigenvalues: Eigenvalues (n,)
-        theta: Spectral polynomial coefficients (K+1,)
+        eigenvalues: Eigenvalues (n,), should be normalized appropriately
+        theta: Spectral parameters (depends on spectral_form)
+        spectral_form: Type of spectral density ('rational', 'chebyshev', etc.)
         grid_spacing: Physical distance between grid points (default: 1.0)
         
     Returns:
         Estimated correlation range in physical units
         
-    Note:
-        This is an approximation based on the effective eigenvalue where
-        precision drops significantly.
+    Example:
+        >>> eigenvalues = torch.linspace(0, 1, 100)
+        >>> theta = torch.tensor([0.0, 1.0])
+        >>> range_est = estimate_spatial_range(eigenvalues, theta, 'rational')
     """
     # Compute spectral density
-    p_lambda = spectral_density_from_polynomial(eigenvalues, theta)
+    p_lambda = spectral_density(eigenvalues, theta, spectral_form)
     
     # Find effective range in eigenvalue units
     lambda_eff = compute_effective_range(eigenvalues, p_lambda)
@@ -369,3 +408,92 @@ def estimate_spatial_range(
         spatial_range = float('inf')
     
     return spatial_range.item()
+
+def get_theta_dimension(spectral_form: str, poly_order: int = 5) -> int:
+    """
+    Get the dimension of theta parameter for a given spectral form.
+    
+    Args:
+        spectral_form: Type of spectral density
+        poly_order: Polynomial order (only used for 'chebyshev')
+        
+    Returns:
+        Dimension of theta parameter vector
+        
+    Example:
+        >>> get_theta_dimension('rational')
+        2
+        >>> get_theta_dimension('chebyshev', poly_order=5)
+        6
+    """
+    if spectral_form == 'chebyshev':
+        return poly_order + 1
+    elif spectral_form in ['rational', 'exponential']:
+        return 2
+    elif spectral_form == 'power_law':
+        return 3
+    else:
+        raise ValueError(f"Unknown spectral_form: {spectral_form}")
+
+
+def interpret_theta_parameters(
+    theta: torch.Tensor, 
+    spectral_form: str
+) -> dict:
+    """
+    Interpret learned theta parameters in terms of physical quantities.
+    
+    Args:
+        theta: Spectral parameters (learned values, on log scale for parametric forms)
+        spectral_form: Type of spectral density
+        
+    Returns:
+        Dictionary with interpreted parameter values
+        
+    Example:
+        >>> theta = torch.tensor([0.0, 1.0])
+        >>> params = interpret_theta_parameters(theta, 'rational')
+        >>> print(params)
+        {'a': 1.0, 'b': 2.718, 'form': '1/(a + b*λ)'}
+    """
+    if spectral_form == 'rational':
+        a = torch.exp(theta[0]).item()
+        b = torch.exp(theta[1]).item()
+        return {
+            'a': a,
+            'b': b,
+            'form': '1/(a + b*λ)',
+            'decay_rate': b / a
+        }
+    
+    elif spectral_form == 'exponential':
+        a = torch.exp(theta[0]).item()
+        b = torch.exp(theta[1]).item()
+        return {
+            'a': a,
+            'b': b,
+            'form': 'exp(-a - b*λ)',
+            'decay_rate': b
+        }
+    
+    elif spectral_form == 'power_law':
+        a = torch.exp(theta[0]).item()
+        b = torch.exp(theta[1]).item()
+        d = torch.exp(theta[2]).item()
+        return {
+            'a': a,
+            'b': b,
+            'd': d,
+            'form': '1/(a + b*λ)^d',
+            'decay_rate': b / a,
+            'power': d
+        }
+    
+    elif spectral_form == 'chebyshev':
+        return {
+            'coefficients': theta.detach().cpu().numpy(),
+            'form': 'exp(Σ θ_k T_k(λ))'
+        }
+    
+    else:
+        raise ValueError(f"Unknown spectral_form: {spectral_form}")

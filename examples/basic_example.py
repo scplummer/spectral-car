@@ -50,7 +50,7 @@ def main():
     
     # Generate benchmark dataset with smooth spatial field
     data = generate_benchmark_dataset(
-        'smooth',
+        'smooth',  # Try 'smooth', 'rough', 'multi_scale', or 'anisotropic'
         n_obs=n_obs,
         grid_size=grid_size,
         eigenvalues=eigenvalues,
@@ -71,13 +71,14 @@ def main():
     # ========================================================================
     print("\n2. Fitting Spectral CAR model...")
     
-    # Initialize model
+    # Initialize model with parametric spectral form
     model = SpectralCARMeanField(
         n_obs=n_obs,
         n_features=X.shape[1],
         eigenvalues=eigenvalues,
         eigenvectors=eigenvectors,
-        poly_order=3,
+        #poly_order=5,  # Only used if spectral_form='chebyshev'
+        spectral_form='rational',  # Choose: 'rational', 'exponential', 'power_law', or 'chebyshev' 
         prior_beta_std=10.0,
         prior_theta_std=0.5,
         prior_tau_a=3.0,
@@ -85,12 +86,12 @@ def main():
         prior_sigma_a=5.0,
         prior_sigma_b=1.0
     )
-    print("DEBUG: ")
-    print(f"Eigenvalue range: [{eigenvalues.min():.3f}, {eigenvalues.max():.3f}]")
-    print(f"Normalized range: [{model.eigenvalues_normalized.min():.3f}, {model.eigenvalues_normalized.max():.3f}]")
-
+    
     print(f"   Model: {model.__class__.__name__}")
-    print(f"   Polynomial order: {model.poly_order}")
+    print(f"   Spectral form: {model.spectral_form}")
+    print(f"   Theta dimension: {len(model.mu_theta)}")
+    print(f"   Eigenvalue range: [{eigenvalues.min():.3f}, {eigenvalues.max():.3f}]")
+    print(f"   Normalized range: [{model.eigenvalues_normalized.min():.3f}, {model.eigenvalues_normalized.max():.3f}]")
     
     # Initialize inference engine
     vi = VariationalInference(model=model)
@@ -100,10 +101,10 @@ def main():
     history = vi.fit(
         y=y,
         X=X,
-        n_iterations=1000,
-        learning_rate=0.01,
+        n_iterations=5000,
+        learning_rate=1e-3,
         verbose=True,
-        print_every=100
+        print_every=1000
     )
     
     print(f"\n   Training complete!")
@@ -129,23 +130,15 @@ def main():
             residual = y - X @ beta_mean
             residual_spectral = model.eigenvectors.T @ residual
             
-            # Get spectral density p(λ)
+            # Get spectral density p(λ) using model's method
             theta = model.mu_theta
-            T = torch.zeros(n_obs, model.poly_order + 1)
-            T[:, 0] = 1.0
-            if model.poly_order >= 1:
-                T[:, 1] = model.eigenvalues_normalized
-            for k in range(2, model.poly_order + 1):
-                T[:, k] = 2 * model.eigenvalues_normalized * T[:, k-1] - T[:, k-2]
-            spectral_density = torch.exp(T @ theta)
-            spectral_density = torch.clamp(spectral_density, min=1e-6)
+            spectral_density = model.spectral_density(theta)
             
             # Get variance parameters
             tau2 = (model.b_tau / (model.a_tau - 1))
             sigma2 = (model.b_sigma / (model.a_sigma - 1))
             
             # Posterior mean in spectral domain
-            # E[α_j | y] = (τ²p(λ_j)) / (σ² + τ²p(λ_j)) * ỹ_j
             posterior_var = tau2 * spectral_density
             posterior_weight = posterior_var / (sigma2 + posterior_var)
             alpha_mean = posterior_weight * residual_spectral
@@ -170,16 +163,8 @@ def main():
         phi_samples = (model.eigenvectors @ alpha_samples.T).T  # (n_samples, n_obs)
     else:
         # For marginalized models, sample using posterior variance
-        # Get posterior weights and variance
         theta = model.mu_theta
-        T = torch.zeros(n_obs, model.poly_order + 1)
-        T[:, 0] = 1.0
-        if model.poly_order >= 1:
-            T[:, 1] = model.eigenvalues_normalized
-        for k in range(2, model.poly_order + 1):
-            T[:, k] = 2 * model.eigenvalues_normalized * T[:, k-1] - T[:, k-2]
-        spectral_density = torch.exp(T @ theta)
-        spectral_density = torch.clamp(spectral_density, min=1e-6)
+        spectral_density = model.spectral_density(theta)
         
         tau2 = (model.b_tau / (model.a_tau - 1))
         sigma2 = (model.b_sigma / (model.a_sigma - 1))
@@ -303,36 +288,30 @@ def main():
     # Plot spectral density - true vs estimated
     ax = axes[1, 2]
     
-    # Compute estimated spectral density from theta
+    # Compute estimated spectral density using model's method
     with torch.no_grad():
-        # Get estimated polynomial coefficients
         theta_est = model.mu_theta
+        tau2_est = (model.b_tau / (model.a_tau - 1))
+        spectral_density_est = model.spectral_density(theta_est)
+        precision_est = tau2_est * spectral_density_est
         
-        # Evaluate at normalized eigenvalues
-        lambda_norm = model.eigenvalues_normalized
-        T = torch.zeros(len(lambda_norm), model.poly_order + 1)
-        T[:, 0] = 1
-        if model.poly_order >= 1:
-            T[:, 1] = lambda_norm
-        for k in range(2, model.poly_order + 1):
-            T[:, k] = 2 * lambda_norm * T[:, k-1] - T[:, k-2]
-        
-        spectral_density_est = torch.exp(T @ theta_est)
-        
-        # Compute true spectral density if theta was provided
-        if data['theta'] is not None:
+        # Compute true spectral density if available AND forms match
+        if (data['theta'] is not None and 
+            data.get('spectral_form') == model.spectral_form):
             theta_true = data['theta']
+            tau2_true = data['tau2']
             
             # Check dimensions match
             if len(theta_true) != len(theta_est):
-                print(f"Warning: theta dimension mismatch - true: {len(theta_true)}, est: {len(theta_est)}")
+                print(f"\nWarning: theta dimension mismatch - true: {len(theta_true)}, est: {len(theta_est)}")
                 # Pad or truncate theta_true to match
                 if len(theta_true) < len(theta_est):
                     theta_true = torch.cat([theta_true, torch.zeros(len(theta_est) - len(theta_true))])
                 else:
                     theta_true = theta_true[:len(theta_est)]
             
-            spectral_density_true = torch.exp(T @ theta_true)
+            spectral_density_true = model.spectral_density(theta_true)
+            precision_true = tau2_true * spectral_density_true
             
             # Print for debugging
             print(f"\nθ comparison:")
@@ -340,21 +319,24 @@ def main():
             print(f"  Estimated: {theta_est.numpy()}")
             
             # Plot both
-            ax.plot(eigenvalues.detach().numpy(), spectral_density_true.detach().numpy(), 
-                   'k--', linewidth=2, label='True', alpha=0.7)
-            ax.plot(eigenvalues.detach().numpy(), spectral_density_est.detach().numpy(), 
-                   'b-', linewidth=2, label='Estimated')
+            ax.plot(eigenvalues.detach().numpy(), precision_true.detach().numpy(), 
+                'k--', linewidth=2, label='True precision', alpha=0.7)
+            ax.plot(eigenvalues.detach().numpy(), precision_est.detach().numpy(), 
+                'b-', linewidth=2, label='Estimated precision')
             ax.legend(loc='best')
         else:
             # Just plot estimated
-            ax.plot(eigenvalues.detach().numpy(), spectral_density_est.detach().numpy(), 
-                   'b-', linewidth=2, label='Estimated')
-    
+            ax.plot(eigenvalues.detach().numpy(), precision_est.detach().numpy(), 
+                'b-', linewidth=2, label='Estimated precision')
+            if data['theta'] is not None:
+                ax.text(0.5, 0.95, f"Data form: {data.get('spectral_form', 'unknown')}\nModel form: {model.spectral_form}",
+                        transform=ax.transAxes, ha='center', va='top',
+                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
     ax.set_xlabel('Eigenvalue')
-    ax.set_ylabel('Spectral Density')
-    ax.set_title('Spectral Density: True vs Estimated')
+    ax.set_ylabel('Precision (τ² × p(λ))')
+    ax.set_title(f'Spectral Density ({model.spectral_form})')
     ax.grid(True, alpha=0.3)
-    
     plt.tight_layout()
     plt.savefig('spectral_car_example.png', dpi=150, bbox_inches='tight')
     print("   Saved figure: spectral_car_example.png")
@@ -366,6 +348,7 @@ def main():
     print("Summary")
     print("=" * 60)
     print(f" Model fitted successfully")
+    print(f" Spectral form: {model.spectral_form}")
     print(f" RMSE: {rmse:.4f}")
     print(f" Spatial field correlation: {phi_correlation:.4f}")
     print(f" Coverage: {coverage_stats['coverage']:.3f}")
@@ -382,4 +365,3 @@ if __name__ == "__main__":
     
     # Run example
     model, data, history = main()
-    
