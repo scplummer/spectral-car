@@ -309,7 +309,7 @@ Output:
 
 The full hierarchical model is:
 
-$
+$$
 \begin{aligned}
 y_i &= \mathbf{x}_i^\top \boldsymbol{\beta} + \phi_i + \epsilon_i, \quad \epsilon_i \sim N(0, \sigma^2) \\
 \boldsymbol{\phi} &\sim N(\mathbf{0}, \tau^2 (D - \rho W)^{-1}) \\
@@ -317,7 +317,7 @@ y_i &= \mathbf{x}_i^\top \boldsymbol{\beta} + \phi_i + \epsilon_i, \quad \epsilo
 \tau^2 &\sim \text{InverseGamma}(a_\tau, b_\tau) \\
 \sigma^2 &\sim \text{InverseGamma}(a_\sigma, b_\sigma)
 \end{aligned}
-$
+$$
 
 Where:
 - $y_i$ = observation at location $i$
@@ -333,17 +333,17 @@ Where:
 
 Transform to the spectral domain using the graph Laplacian eigendecomposition:
 
-$
+$$
 L = D - W = U \Lambda U^\top
-$
+$$
 
 Where $U$ is the matrix of eigenvectors and $\Lambda = \text{diag}(\lambda_1, \ldots, \lambda_n)$ contains the eigenvalues.
 
 The spatial field in the spectral domain:
 
-$
+$$
 \boldsymbol{\alpha} = U^\top \boldsymbol{\phi}, \quad \alpha_j \sim N(0, \tau^2 / \lambda_j)
-$
+$$
 
 Each spectral coefficient $\alpha_j$ is independent with variance inversely proportional to the eigenvalue $\lambda_j$.
 
@@ -351,9 +351,9 @@ Each spectral coefficient $\alpha_j$ is independent with variance inversely prop
 
 Rather than fixed precision $\lambda_j / \tau^2$, we use a Chebyshev polynomial approximation:
 
-$
+$$
 p(\lambda_j; \boldsymbol{\theta}) = \exp\left(\sum_{k=0}^K \theta_k T_k(\tilde{\lambda}_j)\right)
-$
+$$
 
 Where:
 - $T_k(x)$ = Chebyshev polynomial of order $k$
@@ -362,9 +362,9 @@ Where:
 
 The spatial prior becomes:
 
-$
+$$
 \alpha_j \sim N(0, \tau^2 / p(\lambda_j; \boldsymbol{\theta}))
-$
+$$
 
 This allows the model to learn arbitrary smoothness patterns across spatial frequencies.
 
@@ -372,9 +372,9 @@ This allows the model to learn arbitrary smoothness patterns across spatial freq
 
 We approximate the posterior with a mean-field factorization:
 
-$
+$$
 q(\boldsymbol{\beta}, \boldsymbol{\theta}, \tau^2, \sigma^2) = q(\boldsymbol{\beta}) q(\boldsymbol{\theta}) q(\tau^2) q(\sigma^2)
-$
+$$
 
 With:
 - $q(\boldsymbol{\beta}) = N(\boldsymbol{\mu}_\beta, \text{diag}(\boldsymbol{\sigma}_\beta^2))$
@@ -384,9 +384,9 @@ With:
 
 The Evidence Lower Bound (ELBO):
 
-$
+$$
 \mathcal{L} = \mathbb{E}_q[\log p(\mathbf{y} | \boldsymbol{\beta}, \boldsymbol{\theta}, \tau^2, \sigma^2)] - \text{KL}(q \| p)
-$
+$$
 
 Optimized using stochastic gradient ascent with Monte Carlo estimates of the expectation.
 
