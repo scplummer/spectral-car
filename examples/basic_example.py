@@ -365,11 +365,11 @@ def main():
     print("\n" + "=" * 60)
     print("Summary")
     print("=" * 60)
-    print(f"✓ Model fitted successfully")
-    print(f"✓ RMSE: {rmse:.4f}")
-    print(f"✓ Spatial field correlation: {phi_correlation:.4f}")
-    print(f"✓ Coverage: {coverage_stats['coverage']:.3f}")
-    print(f"✓ Visualizations saved")
+    print(f" Model fitted successfully")
+    print(f" RMSE: {rmse:.4f}")
+    print(f" Spatial field correlation: {phi_correlation:.4f}")
+    print(f" Coverage: {coverage_stats['coverage']:.3f}")
+    print(f" Visualizations saved")
     print("=" * 60)
     
     return model, data, history
@@ -383,9 +383,3 @@ if __name__ == "__main__":
     # Run example
     model, data, history = main()
     
-    print("\n✓ Example completed successfully!")
-    print("\nNext steps:")
-    print("  - Try different benchmark datasets: 'smooth', 'rough', 'multi_scale'")
-    print("  - Experiment with different model variants: SpectralCARLowRank, SpectralCARCollapsed")
-    print("  - Add calibration: use CalibratedVI instead of VariationalInference")
-    print("  - Compare models using compute_waic() or compute_loo()")
